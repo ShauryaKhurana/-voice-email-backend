@@ -278,5 +278,29 @@ def apricot_email_assistant():
     # Default: echo intent
     return jsonify({'reply': f'Intent: {intent}'})
 
+@app.route('/apricot-mailbox', methods=['GET'])
+def apricot_mailbox():
+    try:
+        service = get_gmail_service()
+        results = service.users().messages().list(
+            userId='me',
+            labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+            maxResults=10,
+            q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+        ).execute()
+        messages = results.get('messages', [])
+        mailbox = []
+        for msg in messages:
+            msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+            headers = msg_data['payload'].get('headers', [])
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            snippet = msg_data.get('snippet', '')
+            mailbox.append({'id': msg['id'], 'subject': subject, 'sender': sender, 'snippet': snippet})
+        return jsonify({'mailbox': mailbox})
+    except Exception as e:
+        return jsonify({'mailbox': [], 'error': str(e)})
+
 if __name__ == '__main__':
-    app.run(debug=True) 
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True) 
