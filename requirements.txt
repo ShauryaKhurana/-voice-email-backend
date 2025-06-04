@@ -1,6 +1,6 @@
 flask
 flask-cors
-openai
+openai>=1.0.0
 requests
 beautifulsoup4
 google-api-python-client

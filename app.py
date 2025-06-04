@@ -17,7 +17,7 @@ from google.auth.transport.requests import Request
 app = Flask(__name__)
 CORS(app)  # Allow all origins for development
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.basicConfig(level=logging.INFO)
 
 SCOPES = [
@@ -47,7 +47,7 @@ def chat():
     if not user_message:
         return jsonify({'error': 'No message provided'}), 400
     try:
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": "You are Precort, a helpful assistant."},
@@ -130,7 +130,7 @@ def apricot_email_assistant():
         "If the user wants to reply, forward, draft, or send, include the action and recipient if possible."
     )
     try:
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -219,7 +219,7 @@ def apricot_email_assistant():
             snippet = msg_data.get('snippet', '')
             # Use OpenAI to generate a reply body
             reply_prompt = f"Write a short, polite reply to this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-            reply_response = openai.ChatCompletion.create(
+            reply_response = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": reply_prompt}]
             )
@@ -257,7 +257,7 @@ def apricot_email_assistant():
             snippet = msg_data.get('snippet', '')
             # Use OpenAI to generate a forward body
             forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-            forward_response = openai.ChatCompletion.create(
+            forward_response = openai_client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": forward_prompt}]
             )
