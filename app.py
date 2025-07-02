@@ -160,12 +160,17 @@ def apricot_email_assistant():
             current_index = session.get('current_index', 0)
             
             if user_reply in ['yes', 'confirm', 'correct', 'right']:
-                # User confirmed this recipient
-                recipient = matches[current_index]
+                # User confirmed this recipient - extract email from "Name <email>" format
+                recipient_full = matches[current_index]
+                if '<' in recipient_full and '>' in recipient_full:
+                    recipient = recipient_full.split('<')[1].split('>')[0]  # Extract email
+                else:
+                    recipient = recipient_full  # Fallback
+                
                 session['recipient'] = recipient
                 if session['action'] == 'send':
                     session['pending'] = 'ask_subject'
-                    return jsonify({'reply': f"What should be the subject of the email to {recipient}?", 'speak': f"What should be the subject of the email to {recipient}?", 'pending': 'ask_subject'})
+                    return jsonify({'reply': f"What should be the subject of the email to {recipient_full}?", 'speak': f"What should be the subject of the email to {recipient_full}?", 'pending': 'ask_subject'})
                 elif session['action'] == 'forward':
                     session['pending'] = 'confirm_message'
                     # Get latest email
@@ -190,7 +195,7 @@ def apricot_email_assistant():
                     forward_body = forward_response.choices[0].message.content.strip()
                     session['subject'] = "Fwd: " + subject
                     session['body'] = forward_body
-                    reply = f"Ready to send this email to {recipient}:\nSubject: {session['subject']}\nBody: {session['body']}\nSay 'yes' to send or 'no' to cancel."
+                    reply = f"Ready to send this email to {recipient_full}:\nSubject: {session['subject']}\nBody: {session['body']}\nSay 'yes' to send or 'no' to cancel."
                     return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_message'})
             elif user_reply in ['no', 'nope', 'wrong', 'incorrect']:
                 # Try next match
@@ -379,26 +384,44 @@ def apricot_email_assistant():
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
-                # Search contacts in mailbox
-                results = service.users().messages().list(userId='me', maxResults=50, q='').execute()
+                # Search contacts in mailbox and build clean contact list
+                results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
                 messages = results.get('messages', [])
-                contacts = set()
+                contacts_dict = {}  # name -> primary email
+                
                 for msg in messages:
                     msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
                     for h in msg_data['payload'].get('headers', []):
                         if h['name'] in ['From', 'To']:
-                            contacts.add(h['value'])
+                            email = h['value']
+                            # Extract name from email format: "John Doe <john@example.com>" or just "john@example.com"
+                            if '<' in email and '>' in email:
+                                # Format: "John Doe <john@example.com>"
+                                name_part = email.split('<')[0].strip()
+                                email_part = email.split('<')[1].split('>')[0]
+                            else:
+                                # Format: "john@example.com"
+                                email_part = email
+                                name_part = email.split('@')[0]  # Use username as name
+                            
+                            # Clean up name (remove quotes, extra spaces)
+                            name_part = name_part.strip().strip('"').strip("'")
+                            if name_part and '@' not in name_part:  # Valid name
+                                # Use the first email we find for each name
+                                if name_part not in contacts_dict:
+                                    contacts_dict[name_part] = email_part
+                
                 # Use fuzzy matching to find similar names
                 matches = []
-                for contact in contacts:
-                    # Extract name from email (before @) or use full contact
-                    contact_name = contact.split('@')[0] if '@' in contact else contact
-                    # Calculate similarity
-                    similarity = get_close_matches(recipient_query.lower(), [contact_name.lower()], n=1, cutoff=0.3)
+                for name, email in contacts_dict.items():
+                    # Calculate similarity with the query
+                    similarity = get_close_matches(recipient_query.lower(), [name.lower()], n=1, cutoff=0.3)
                     if similarity:
-                        matches.append(contact)
+                        matches.append(f"{name} <{email}>")
+                
                 if not matches:
-                    return jsonify({'reply': f"Couldn't find anyone matching '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone matching '{recipient_query}'. Please try a different name."})
+                    return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
+                
                 # Start with first match
                 pending_actions[access_token] = {
                     'pending': 'confirm_recipient',
@@ -423,26 +446,44 @@ def apricot_email_assistant():
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
-                # Search contacts in mailbox
-                results = service.users().messages().list(userId='me', maxResults=50, q='').execute()
+                # Search contacts in mailbox and build clean contact list
+                results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
                 messages = results.get('messages', [])
-                contacts = set()
+                contacts_dict = {}  # name -> primary email
+                
                 for msg in messages:
                     msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
                     for h in msg_data['payload'].get('headers', []):
                         if h['name'] in ['From', 'To']:
-                            contacts.add(h['value'])
+                            email = h['value']
+                            # Extract name from email format: "John Doe <john@example.com>" or just "john@example.com"
+                            if '<' in email and '>' in email:
+                                # Format: "John Doe <john@example.com>"
+                                name_part = email.split('<')[0].strip()
+                                email_part = email.split('<')[1].split('>')[0]
+                            else:
+                                # Format: "john@example.com"
+                                email_part = email
+                                name_part = email.split('@')[0]  # Use username as name
+                            
+                            # Clean up name (remove quotes, extra spaces)
+                            name_part = name_part.strip().strip('"').strip("'")
+                            if name_part and '@' not in name_part:  # Valid name
+                                # Use the first email we find for each name
+                                if name_part not in contacts_dict:
+                                    contacts_dict[name_part] = email_part
+                
                 # Use fuzzy matching to find similar names
                 matches = []
-                for contact in contacts:
-                    # Extract name from email (before @) or use full contact
-                    contact_name = contact.split('@')[0] if '@' in contact else contact
-                    # Calculate similarity
-                    similarity = get_close_matches(recipient_query.lower(), [contact_name.lower()], n=1, cutoff=0.3)
+                for name, email in contacts_dict.items():
+                    # Calculate similarity with the query
+                    similarity = get_close_matches(recipient_query.lower(), [name.lower()], n=1, cutoff=0.3)
                     if similarity:
-                        matches.append(contact)
+                        matches.append(f"{name} <{email}>")
+                
                 if not matches:
-                    return jsonify({'reply': f"Couldn't find anyone matching '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone matching '{recipient_query}'. Please try a different name."})
+                    return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
+                
                 # Start with first match
                 pending_actions[access_token] = {
                     'pending': 'confirm_recipient',
