@@ -384,6 +384,9 @@ def apricot_email_assistant():
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
+                # Extract first name from query
+                query_first_name = recipient_query.split()[0].lower() if recipient_query else ""
+                
                 # Search contacts in mailbox and build clean contact list
                 results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
                 messages = results.get('messages', [])
@@ -407,17 +410,40 @@ def apricot_email_assistant():
                             # Clean up name (remove quotes, extra spaces)
                             name_part = name_part.strip().strip('"').strip("'")
                             if name_part and '@' not in name_part:  # Valid name
-                                # Use the first email we find for each name
-                                if name_part not in contacts_dict:
-                                    contacts_dict[name_part] = email_part
+                                # Extract first name
+                                first_name = name_part.split()[0].lower() if name_part else ""
+                                # Only add if first name matches query first name
+                                if first_name and first_name == query_first_name:
+                                    # Use the first email we find for each name
+                                    if name_part not in contacts_dict:
+                                        contacts_dict[name_part] = email_part
                 
-                # Use fuzzy matching to find similar names
-                matches = []
-                for name, email in contacts_dict.items():
-                    # Calculate similarity with the query
-                    similarity = get_close_matches(recipient_query.lower(), [name.lower()], n=1, cutoff=0.3)
-                    if similarity:
-                        matches.append(f"{name} <{email}>")
+                # If no exact first name match, try fuzzy matching on first names only
+                if not contacts_dict:
+                    for msg in messages:
+                        msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
+                        for h in msg_data['payload'].get('headers', []):
+                            if h['name'] in ['From', 'To']:
+                                email = h['value']
+                                if '<' in email and '>' in email:
+                                    name_part = email.split('<')[0].strip()
+                                    email_part = email.split('<')[1].split('>')[0]
+                                else:
+                                    email_part = email
+                                    name_part = email.split('@')[0]
+                                
+                                name_part = name_part.strip().strip('"').strip("'")
+                                if name_part and '@' not in name_part:
+                                    first_name = name_part.split()[0].lower() if name_part else ""
+                                    if first_name:
+                                        # Use fuzzy matching on first name only
+                                        similarity = get_close_matches(query_first_name, [first_name], n=1, cutoff=0.6)
+                                        if similarity:
+                                            if name_part not in contacts_dict:
+                                                contacts_dict[name_part] = email_part
+                
+                # Convert to matches list
+                matches = [f"{name} <{email}>" for name, email in contacts_dict.items()]
                 
                 if not matches:
                     return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
@@ -446,6 +472,9 @@ def apricot_email_assistant():
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
+                # Extract first name from query
+                query_first_name = recipient_query.split()[0].lower() if recipient_query else ""
+                
                 # Search contacts in mailbox and build clean contact list
                 results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
                 messages = results.get('messages', [])
@@ -469,17 +498,40 @@ def apricot_email_assistant():
                             # Clean up name (remove quotes, extra spaces)
                             name_part = name_part.strip().strip('"').strip("'")
                             if name_part and '@' not in name_part:  # Valid name
-                                # Use the first email we find for each name
-                                if name_part not in contacts_dict:
-                                    contacts_dict[name_part] = email_part
+                                # Extract first name
+                                first_name = name_part.split()[0].lower() if name_part else ""
+                                # Only add if first name matches query first name
+                                if first_name and first_name == query_first_name:
+                                    # Use the first email we find for each name
+                                    if name_part not in contacts_dict:
+                                        contacts_dict[name_part] = email_part
                 
-                # Use fuzzy matching to find similar names
-                matches = []
-                for name, email in contacts_dict.items():
-                    # Calculate similarity with the query
-                    similarity = get_close_matches(recipient_query.lower(), [name.lower()], n=1, cutoff=0.3)
-                    if similarity:
-                        matches.append(f"{name} <{email}>")
+                # If no exact first name match, try fuzzy matching on first names only
+                if not contacts_dict:
+                    for msg in messages:
+                        msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
+                        for h in msg_data['payload'].get('headers', []):
+                            if h['name'] in ['From', 'To']:
+                                email = h['value']
+                                if '<' in email and '>' in email:
+                                    name_part = email.split('<')[0].strip()
+                                    email_part = email.split('<')[1].split('>')[0]
+                                else:
+                                    email_part = email
+                                    name_part = email.split('@')[0]
+                                
+                                name_part = name_part.strip().strip('"').strip("'")
+                                if name_part and '@' not in name_part:
+                                    first_name = name_part.split()[0].lower() if name_part else ""
+                                    if first_name:
+                                        # Use fuzzy matching on first name only
+                                        similarity = get_close_matches(query_first_name, [first_name], n=1, cutoff=0.6)
+                                        if similarity:
+                                            if name_part not in contacts_dict:
+                                                contacts_dict[name_part] = email_part
+                
+                # Convert to matches list
+                matches = [f"{name} <{email}>" for name, email in contacts_dict.items()]
                 
                 if not matches:
                     return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
