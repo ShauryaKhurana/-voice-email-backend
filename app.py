@@ -25,6 +25,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
+<<<<<<< HEAD
+REDIRECT_URI = "https://voice-email-backend.onrender.com/oauth2callback"  # Update if your backend URL changes
+=======
 def get_gmail_service():
     creds = None
     if os.path.exists("token.json"):
@@ -39,6 +42,7 @@ def get_gmail_service():
             token.write(creds.to_json())
     service = build("gmail", "v1", credentials=creds)
     return service
+>>>>>>> parent of 0eb36d5 (Gmail 1)
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -117,6 +121,11 @@ def send_contact_email():
 
 @app.route('/apricot-email-assistant', methods=['POST'])
 def apricot_email_assistant():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({'reply': 'Missing or invalid Authorization header'}), 401
+    access_token = auth_header.split(' ')[1]
+    service = get_gmail_service_from_token(access_token)
     data = request.get_json()
     command = data.get('command', '')
     if not command:
@@ -141,7 +150,6 @@ def apricot_email_assistant():
     except Exception as e:
         return jsonify({'reply': f'OpenAI error: {e}'}), 500
     # For now, just echo the intent. Next, add logic for summarize, reply, etc.
-    service = get_gmail_service()
     # Summarize unread emails
     if "summarize unread" in intent:
         try:
@@ -280,8 +288,12 @@ def apricot_email_assistant():
 
 @app.route('/apricot-mailbox', methods=['GET'])
 def apricot_mailbox():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({'mailbox': [], 'error': 'Missing or invalid Authorization header'}), 401
+    access_token = auth_header.split(' ')[1]
+    service = get_gmail_service_from_token(access_token)
     try:
-        service = get_gmail_service()
         results = service.users().messages().list(
             userId='me',
             labelIds=['CATEGORY_PERSONAL', 'INBOX'],
