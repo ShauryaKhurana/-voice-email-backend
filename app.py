@@ -41,7 +41,17 @@ def get_gmail_service():
     return service
 
 def get_gmail_service_from_token(access_token):
-    creds = Credentials(token=access_token)
+    creds = Credentials(
+        token=access_token,
+        refresh_token=None,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=None,
+        client_secret=None,
+        scopes=[
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.compose"
+        ]
+    )
     service = build("gmail", "v1", credentials=creds)
     return service
 
