@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from difflib import get_close_matches
+from flask import session
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins for development
@@ -141,7 +142,9 @@ def apricot_email_assistant():
     service = get_gmail_service_from_token(access_token)
     data = request.get_json()
     command = data.get('command', '')
+    context = data.get('context', {})
     print(f'[EMAIL ASSISTANT] Received command: {command}')
+    print(f'[EMAIL ASSISTANT] Context: {context}')
     if not command:
         print('[EMAIL ASSISTANT] No command received')
         return jsonify({'reply': "No command received.", 'speak': "No command received."}), 400
@@ -152,10 +155,10 @@ def apricot_email_assistant():
         'archive my latest email',
         'delete my latest email',
         'reply to my latest email',
-        'forward my latest email',
+        'forward my latest email to [name]',
         'summarize my inbox',
         'how many unread emails do I have',
-        'send an email',
+        'send an email to [name]',
     ]
     cmd_lc = command.lower()
     match = get_close_matches(cmd_lc, supported, n=1, cutoff=0.5)
@@ -163,6 +166,187 @@ def apricot_email_assistant():
     print(f'[EMAIL ASSISTANT] Matched intent: {intent}')
 
     try:
+        # Conversational send/forward logic
+        # 1. Forward my latest email to [name]
+        if 'forward my latest email to' in intent or context.get('action') == 'forward':
+            # Step 1: Get recipient
+            recipient = context.get('recipient')
+            if not recipient:
+                # Try to extract recipient from command
+                extract_prompt = f"Extract the recipient's email or name from this command: '{command}'. Reply with only the email or name, nothing else. If not found, reply 'unknown'."
+                extract_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": extract_prompt}]
+                )
+                recipient_guess = extract_response.choices[0].message.content.strip()
+                print(f'[EMAIL ASSISTANT] Forward recipient guess: {recipient_guess}')
+                if recipient_guess.lower() == 'unknown' or not recipient_guess:
+                    return jsonify({
+                        'reply': "Who do you want to forward this email to? Please say their name or email.",
+                        'speak': "Who do you want to forward this email to? Please say their name or email.",
+                        'context': {'action': 'forward'}
+                    })
+                recipient = recipient_guess
+            # Step 2: Search for matching contacts in mailbox
+            if '@' not in recipient:
+                # Search for email addresses in mailbox matching the name
+                results = service.users().messages().list(
+                    userId='me',
+                    maxResults=50,
+                    labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+                ).execute()
+                messages = results.get('messages', [])
+                found_emails = set()
+                for msg in messages:
+                    msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+                    headers = msg_data['payload'].get('headers', [])
+                    for h in headers:
+                        if h['name'].lower() == 'from' and recipient.lower() in h['value'].lower():
+                            # Extract email from header
+                            import re
+                            match = re.search(r'<(.+?)>', h['value'])
+                            email = match.group(1) if match else h['value']
+                            found_emails.add(email)
+                found_emails = list(found_emails)
+                if len(found_emails) == 0:
+                    return jsonify({
+                        'reply': f"I couldn't find anyone named {recipient} in your mailbox. Please say their email address.",
+                        'speak': f"I couldn't find anyone named {recipient} in your mailbox. Please say their email address.",
+                        'context': {'action': 'forward'}
+                    })
+                if len(found_emails) > 1:
+                    return jsonify({
+                        'reply': f"I found multiple contacts: {', '.join(found_emails)}. Which one should I use? Please say the email address.",
+                        'speak': f"I found multiple contacts: {', '.join(found_emails)}. Which one should I use? Please say the email address.",
+                        'context': {'action': 'forward'}
+                    })
+                recipient = found_emails[0]
+            # Step 3: Confirm before sending
+            if not context.get('confirmed'):
+                return jsonify({
+                    'reply': f"Should I forward your latest email to {recipient}? Say yes or no.",
+                    'speak': f"Should I forward your latest email to {recipient}? Say yes or no.",
+                    'context': {'action': 'forward', 'recipient': recipient}
+                })
+            if context.get('confirmed') == 'no':
+                return jsonify({'reply': "Cancelled forwarding.", 'speak': "Cancelled forwarding."})
+            # Step 4: Actually forward
+            try:
+                # Get latest email
+                results = service.users().messages().list(
+                    userId='me',
+                    maxResults=1,
+                    labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+                ).execute()
+                messages = results.get('messages', [])
+                if not messages:
+                    return jsonify({'reply': "No email found to forward.", 'speak': "No email found to forward."})
+                msg_id = messages[0]['id']
+                msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+                headers = msg_data['payload'].get('headers', [])
+                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                snippet = msg_data.get('snippet', '')
+                forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+                forward_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": forward_prompt}]
+                )
+                forward_body = forward_response.choices[0].message.content.strip()
+                from email.mime.text import MIMEText
+                import base64
+                fwd_message = MIMEText(forward_body)
+                fwd_message['to'] = recipient
+                fwd_message['subject'] = "Fwd: " + subject
+                raw = base64.urlsafe_b64encode(fwd_message.as_bytes()).decode()
+                msg = {'raw': raw}
+                service.users().messages().send(userId='me', body=msg).execute()
+                return jsonify({'reply': f"Email forwarded to {recipient}.", 'speak': f"Email forwarded to {recipient}."})
+            except Exception as e:
+                print(f'[EMAIL ASSISTANT] Error (forward to): {e}')
+                return jsonify({'reply': f"Failed to forward: {e}", 'speak': f"Failed to forward: {e}"})
+        # 2. Send an email to [name]
+        if 'send an email to' in intent or context.get('action') == 'send':
+            recipient = context.get('recipient')
+            if not recipient:
+                extract_prompt = f"Extract the recipient's email or name from this command: '{command}'. Reply with only the email or name, nothing else. If not found, reply 'unknown'."
+                extract_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": extract_prompt}]
+                )
+                recipient_guess = extract_response.choices[0].message.content.strip()
+                print(f'[EMAIL ASSISTANT] Send email recipient guess: {recipient_guess}')
+                if recipient_guess.lower() == 'unknown' or not recipient_guess:
+                    return jsonify({
+                        'reply': "Who do you want to send the email to? Please say their name or email.",
+                        'speak': "Who do you want to send the email to? Please say their name or email.",
+                        'context': {'action': 'send'}
+                    })
+                recipient = recipient_guess
+            if '@' not in recipient:
+                results = service.users().messages().list(
+                    userId='me',
+                    maxResults=50,
+                    labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+                ).execute()
+                messages = results.get('messages', [])
+                found_emails = set()
+                for msg in messages:
+                    msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+                    headers = msg_data['payload'].get('headers', [])
+                    for h in headers:
+                        if h['name'].lower() == 'from' and recipient.lower() in h['value'].lower():
+                            import re
+                            match = re.search(r'<(.+?)>', h['value'])
+                            email = match.group(1) if match else h['value']
+                            found_emails.add(email)
+                found_emails = list(found_emails)
+                if len(found_emails) == 0:
+                    return jsonify({
+                        'reply': f"I couldn't find anyone named {recipient} in your mailbox. Please say their email address.",
+                        'speak': f"I couldn't find anyone named {recipient} in your mailbox. Please say their email address.",
+                        'context': {'action': 'send'}
+                    })
+                if len(found_emails) > 1:
+                    return jsonify({
+                        'reply': f"I found multiple contacts: {', '.join(found_emails)}. Which one should I use? Please say the email address.",
+                        'speak': f"I found multiple contacts: {', '.join(found_emails)}. Which one should I use? Please say the email address.",
+                        'context': {'action': 'send'}
+                    })
+                recipient = found_emails[0]
+            # Step 3: Ask for message body
+            if not context.get('body'):
+                return jsonify({
+                    'reply': f"What would you like to say to {recipient}?",
+                    'speak': f"What would you like to say to {recipient}?",
+                    'context': {'action': 'send', 'recipient': recipient}
+                })
+            # Step 4: Confirm before sending
+            if not context.get('confirmed'):
+                return jsonify({
+                    'reply': f"Should I send this email to {recipient}? '{context['body']}'. Say yes or no.",
+                    'speak': f"Should I send this email to {recipient}? '{context['body']}'. Say yes or no.",
+                    'context': {'action': 'send', 'recipient': recipient, 'body': context['body']}
+                })
+            if context.get('confirmed') == 'no':
+                return jsonify({'reply': "Cancelled sending email.", 'speak': "Cancelled sending email."})
+            # Step 5: Actually send
+            try:
+                from email.mime.text import MIMEText
+                import base64
+                message = MIMEText(context['body'])
+                message['to'] = recipient
+                message['subject'] = "A message from Precort"
+                raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+                msg = {'raw': raw}
+                service.users().messages().send(userId='me', body=msg).execute()
+                return jsonify({'reply': f"Email sent to {recipient}.", 'speak': f"Email sent to {recipient}."})
+            except Exception as e:
+                print(f'[EMAIL ASSISTANT] Error (send email): {e}')
+                return jsonify({'reply': f"Failed to send email: {e}", 'speak': f"Failed to send email: {e}"})
         # Summarize unread emails
         if 'summarize unread' in intent or 'summarize my inbox' in intent:
             try:
@@ -282,43 +466,6 @@ def apricot_email_assistant():
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (reply): {e}')
                 return jsonify({'reply': f"Failed to reply: {e}", 'speak': f"Failed to reply: {e}"})
-        # Forward latest email
-        if 'forward' in intent:
-            try:
-                results = service.users().messages().list(
-                    userId='me',
-                    maxResults=1,
-                    labelIds=['CATEGORY_PERSONAL', 'INBOX'],
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
-                messages = results.get('messages', [])
-                if not messages:
-                    return jsonify({'reply': "No email found to forward.", 'speak': "No email found to forward."})
-                msg_id = messages[0]['id']
-                msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-                headers = msg_data['payload'].get('headers', [])
-                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                snippet = msg_data.get('snippet', '')
-                forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-                forward_response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": forward_prompt}]
-                )
-                forward_body = forward_response.choices[0].message.content.strip()
-                recipient = sender
-                from email.mime.text import MIMEText
-                import base64
-                fwd_message = MIMEText(forward_body)
-                fwd_message['to'] = recipient
-                fwd_message['subject'] = "Fwd: " + subject
-                raw = base64.urlsafe_b64encode(fwd_message.as_bytes()).decode()
-                msg = {'raw': raw}
-                service.users().messages().send(userId='me', body=msg).execute()
-                return jsonify({'reply': "Email forwarded.", 'speak': "Email forwarded."})
-            except Exception as e:
-                print(f'[EMAIL ASSISTANT] Error (forward): {e}')
-                return jsonify({'reply': f"Failed to forward: {e}", 'speak': f"Failed to forward: {e}"})
         # How many unread emails
         if 'how many unread' in intent:
             try:
@@ -334,10 +481,6 @@ def apricot_email_assistant():
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (how many unread): {e}')
                 return jsonify({'reply': f"Failed to count unread emails: {e}", 'speak': f"Failed to count unread emails: {e}"})
-        # Send an email (demo: just echo)
-        if 'send an email' in intent:
-            print('[EMAIL ASSISTANT] Send email intent (placeholder)')
-            return jsonify({'reply': "Sending emails by voice is coming soon!", 'speak': "Sending emails by voice is coming soon!"})
         # Default: echo intent
         print(f'[EMAIL ASSISTANT] Default intent: {intent}')
         return jsonify({'reply': f'Intent: {intent}', 'speak': f'Intent: {intent}'})
