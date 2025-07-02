@@ -46,19 +46,20 @@ def get_gmail_service():
     return service
 
 def get_gmail_service_from_token(access_token):
-    creds = Credentials(
-        token=access_token,
-        refresh_token=None,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=None,
-        client_secret=None,
-        scopes=[
-            "https://www.googleapis.com/auth/gmail.modify",
-            "https://www.googleapis.com/auth/gmail.compose"
-        ]
-    )
-    service = build("gmail", "v1", credentials=creds)
+    credentials = Credentials(token=access_token, scopes=SCOPES)
+    service = build('gmail', 'v1', credentials=credentials)
     return service
+
+def get_user_name_from_gmail(access_token):
+    """Get the user's actual name from Gmail profile"""
+    try:
+        credentials = Credentials(token=access_token, scopes=SCOPES)
+        service = build('gmail', 'v1', credentials=credentials)
+        profile = service.users().getProfile(userId='me').execute()
+        return profile.get('emailAddress', 'Gmail User')
+    except Exception as e:
+        print(f'[EMAIL ASSISTANT] Error getting user name: {e}')
+        return 'Gmail User'
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -187,9 +188,10 @@ def apricot_email_assistant():
                     subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                     sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                     snippet = msg_data.get('snippet', '')
-                    forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+                    user_name = get_user_name_from_gmail(access_token)
+                    forward_prompt = f"Write a short message from {user_name} to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
                     forward_response = openai_client.chat.completions.create(
-                        model="gpt-3.5-turbo",
+            model="gpt-3.5-turbo",
                         messages=[{"role": "user", "content": forward_prompt}]
                     )
                     forward_body = forward_response.choices[0].message.content.strip()
@@ -217,8 +219,32 @@ def apricot_email_assistant():
             session['pending'] = 'ask_body'
             return jsonify({'reply': f"What should be the content of the email to {session['recipient']}?", 'speak': f"What should be the content of the email to {session['recipient']}?", 'pending': 'ask_body'})
         elif session['pending'] == 'ask_body':
-            session['body'] = command.strip()
+            user_topic = command.strip()
             session['pending'] = 'confirm_message'
+            user_name = get_user_name_from_gmail(access_token)
+            
+            # Use ChatGPT to write a proper email body based on the topic
+            body_prompt = f"""
+            Write a professional, friendly email from {user_name} to {session['recipient']}.
+            
+            Topic/Context: {user_topic}
+            Subject: {session['subject']}
+            
+            Requirements:
+            - Write a complete, well-structured email
+            - Be professional but friendly
+            - Include a proper greeting and closing
+            - Make it sound natural and personal
+            - Keep it concise but complete
+            - Use the topic as the main content of the email
+            
+            Write the email body:"""
+            
+            body_response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": body_prompt}]
+            )
+            session['body'] = body_response.choices[0].message.content.strip()
             reply = f"Ready to send this email to {session['recipient']}:\nSubject: {session['subject']}\nBody: {session['body']}\nSay 'yes' to send or 'no' to cancel."
             return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_message'})
         elif session['pending'] == 'confirm_message':
@@ -356,7 +382,8 @@ def apricot_email_assistant():
                 subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
                 sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
                 snippet = msg_data.get('snippet', '')
-                reply_prompt = f"Write a short, polite reply to this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+                user_name = get_user_name_from_gmail(access_token)
+                reply_prompt = f"Write a short, polite reply to this email from {user_name}:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
                 reply_response = openai_client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": reply_prompt}]
@@ -377,15 +404,24 @@ def apricot_email_assistant():
         # Forward my latest email to [name]
         if 'forward my latest email to' in command.lower():
             try:
-                # Extract recipient using OpenAI
-                extract_prompt = f"Extract the recipient's email or name from this command: '{command}'. Reply with only the email or name, nothing else."
+                # Extract recipient using OpenAI with better prompting
+                extract_prompt = f"""
+                Extract the recipient's name from this command: '{command}'
+                
+                Rules:
+                - Return ONLY the first name or full name of the person
+                - If it's a full name like "John Smith", return "John Smith"
+                - If it's just a first name like "John", return "John"
+                - Don't include email addresses, just the name
+                - Clean up any extra words or punctuation
+                
+                Command: {command}
+                Recipient name:"""
                 extract_response = openai_client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
-                # Extract first name from query
-                query_first_name = recipient_query.split()[0].lower() if recipient_query else ""
                 
                 # Search contacts in mailbox and build clean contact list
                 results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
@@ -410,40 +446,44 @@ def apricot_email_assistant():
                             # Clean up name (remove quotes, extra spaces)
                             name_part = name_part.strip().strip('"').strip("'")
                             if name_part and '@' not in name_part:  # Valid name
-                                # Extract first name
-                                first_name = name_part.split()[0].lower() if name_part else ""
-                                # Only add if first name matches query first name
-                                if first_name and first_name == query_first_name:
-                                    # Use the first email we find for each name
-                                    if name_part not in contacts_dict:
-                                        contacts_dict[name_part] = email_part
+                                # Use the first email we find for each name
+                                if name_part not in contacts_dict:
+                                    contacts_dict[name_part] = email_part
                 
-                # If no exact first name match, try fuzzy matching on first names only
-                if not contacts_dict:
-                    for msg in messages:
-                        msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
-                        for h in msg_data['payload'].get('headers', []):
-                            if h['name'] in ['From', 'To']:
-                                email = h['value']
-                                if '<' in email and '>' in email:
-                                    name_part = email.split('<')[0].strip()
-                                    email_part = email.split('<')[1].split('>')[0]
-                                else:
-                                    email_part = email
-                                    name_part = email.split('@')[0]
-                                
-                                name_part = name_part.strip().strip('"').strip("'")
-                                if name_part and '@' not in name_part:
-                                    first_name = name_part.split()[0].lower() if name_part else ""
-                                    if first_name:
-                                        # Use fuzzy matching on first name only
-                                        similarity = get_close_matches(query_first_name, [first_name], n=1, cutoff=0.6)
-                                        if similarity:
-                                            if name_part not in contacts_dict:
-                                                contacts_dict[name_part] = email_part
+                # Use ChatGPT to find the best matches
+                match_prompt = f"""
+                I'm looking for a person named "{recipient_query}" in my contacts.
                 
-                # Convert to matches list
-                matches = [f"{name} <{email}>" for name, email in contacts_dict.items()]
+                Available contacts:
+                {chr(10).join([f"- {name} <{email}>" for name, email in contacts_dict.items()])}
+                
+                Find the best matches for "{recipient_query}". Consider:
+                - Exact name matches
+                - Similar first names
+                - Common nicknames
+                - Partial matches
+                
+                Return ONLY the full contact entries (name <email>) that match, one per line.
+                If no good matches, return "NO_MATCH".
+                """
+                
+                match_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": match_prompt}]
+                )
+                
+                match_result = match_response.choices[0].message.content.strip()
+                if match_result == "NO_MATCH":
+                    return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
+                
+                # Parse ChatGPT's response to get matches
+                matches = []
+                for line in match_result.split('\n'):
+                    line = line.strip()
+                    if line.startswith('- '):
+                        line = line[2:]  # Remove "- " prefix
+                    if '<' in line and '>' in line:
+                        matches.append(line)
                 
                 if not matches:
                     return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
@@ -457,6 +497,15 @@ def apricot_email_assistant():
                     'original_command': command,
                     'recipient_query': recipient_query
                 }
+                user_name = get_user_name_from_gmail(access_token)
+                forward_prompt = f"Write a short message from {user_name} to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+                forward_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": forward_prompt}]
+                )
+                forward_body = forward_response.choices[0].message.content.strip()
+                session['subject'] = "Fwd: " + subject
+                session['body'] = forward_body
                 reply = f"Did you mean {matches[0]}? Say yes or no."
                 return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_recipient'})
             except Exception as e:
@@ -465,15 +514,24 @@ def apricot_email_assistant():
         # Send an email to [name]
         if 'send an email to' in command.lower():
             try:
-                # Extract recipient using OpenAI
-                extract_prompt = f"Extract the recipient's email or name from this command: '{command}'. Reply with only the email or name, nothing else."
+                # Extract recipient using OpenAI with better prompting
+                extract_prompt = f"""
+                Extract the recipient's name from this command: '{command}'
+                
+                Rules:
+                - Return ONLY the first name or full name of the person
+                - If it's a full name like "John Smith", return "John Smith"
+                - If it's just a first name like "John", return "John"
+                - Don't include email addresses, just the name
+                - Clean up any extra words or punctuation
+                
+                Command: {command}
+                Recipient name:"""
                 extract_response = openai_client.chat.completions.create(
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
                 recipient_query = extract_response.choices[0].message.content.strip()
-                # Extract first name from query
-                query_first_name = recipient_query.split()[0].lower() if recipient_query else ""
                 
                 # Search contacts in mailbox and build clean contact list
                 results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
@@ -498,40 +556,44 @@ def apricot_email_assistant():
                             # Clean up name (remove quotes, extra spaces)
                             name_part = name_part.strip().strip('"').strip("'")
                             if name_part and '@' not in name_part:  # Valid name
-                                # Extract first name
-                                first_name = name_part.split()[0].lower() if name_part else ""
-                                # Only add if first name matches query first name
-                                if first_name and first_name == query_first_name:
-                                    # Use the first email we find for each name
-                                    if name_part not in contacts_dict:
-                                        contacts_dict[name_part] = email_part
+                                # Use the first email we find for each name
+                                if name_part not in contacts_dict:
+                                    contacts_dict[name_part] = email_part
                 
-                # If no exact first name match, try fuzzy matching on first names only
-                if not contacts_dict:
-                    for msg in messages:
-                        msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
-                        for h in msg_data['payload'].get('headers', []):
-                            if h['name'] in ['From', 'To']:
-                                email = h['value']
-                                if '<' in email and '>' in email:
-                                    name_part = email.split('<')[0].strip()
-                                    email_part = email.split('<')[1].split('>')[0]
-                                else:
-                                    email_part = email
-                                    name_part = email.split('@')[0]
-                                
-                                name_part = name_part.strip().strip('"').strip("'")
-                                if name_part and '@' not in name_part:
-                                    first_name = name_part.split()[0].lower() if name_part else ""
-                                    if first_name:
-                                        # Use fuzzy matching on first name only
-                                        similarity = get_close_matches(query_first_name, [first_name], n=1, cutoff=0.6)
-                                        if similarity:
-                                            if name_part not in contacts_dict:
-                                                contacts_dict[name_part] = email_part
+                # Use ChatGPT to find the best matches
+                match_prompt = f"""
+                I'm looking for a person named "{recipient_query}" in my contacts.
                 
-                # Convert to matches list
-                matches = [f"{name} <{email}>" for name, email in contacts_dict.items()]
+                Available contacts:
+                {chr(10).join([f"- {name} <{email}>" for name, email in contacts_dict.items()])}
+                
+                Find the best matches for "{recipient_query}". Consider:
+                - Exact name matches
+                - Similar first names
+                - Common nicknames
+                - Partial matches
+                
+                Return ONLY the full contact entries (name <email>) that match, one per line.
+                If no good matches, return "NO_MATCH".
+                """
+                
+                match_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": match_prompt}]
+                )
+                
+                match_result = match_response.choices[0].message.content.strip()
+                if match_result == "NO_MATCH":
+                    return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
+                
+                # Parse ChatGPT's response to get matches
+                matches = []
+                for line in match_result.split('\n'):
+                    line = line.strip()
+                    if line.startswith('- '):
+                        line = line[2:]  # Remove "- " prefix
+                    if '<' in line and '>' in line:
+                        matches.append(line)
                 
                 if not matches:
                     return jsonify({'reply': f"Couldn't find anyone named '{recipient_query}'. Please try a different name.", 'speak': f"Couldn't find anyone named '{recipient_query}'. Please try a different name."})
@@ -545,6 +607,8 @@ def apricot_email_assistant():
                     'original_command': command,
                     'recipient_query': recipient_query
                 }
+                user_name = get_user_name_from_gmail(access_token)
+                body_prompt = f"Write a short, friendly email from {user_name} to {recipient} about what the user just said: '{session['original_command']}'."
                 reply = f"Did you mean {matches[0]}? Say yes or no."
                 return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_recipient'})
             except Exception as e:
