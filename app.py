@@ -40,6 +40,11 @@ def get_gmail_service():
     service = build("gmail", "v1", credentials=creds)
     return service
 
+def get_gmail_service_from_token(access_token):
+    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    service = build("gmail", "v1", credentials=creds)
+    return service
+
 @app.route('/chat', methods=['POST'])
 def chat():
     data = request.json
@@ -121,7 +126,7 @@ def apricot_email_assistant():
     if not auth_header.startswith('Bearer '):
         return jsonify({'reply': 'Missing or invalid Authorization header'}), 401
     access_token = auth_header.split(' ')[1]
-    service = get_gmail_service()
+    service = get_gmail_service_from_token(access_token)
     data = request.get_json()
     command = data.get('command', '')
     if not command:
@@ -288,7 +293,7 @@ def apricot_mailbox():
     if not auth_header.startswith('Bearer '):
         return jsonify({'mailbox': [], 'error': 'Missing or invalid Authorization header'}), 401
     access_token = auth_header.split(' ')[1]
-    service = get_gmail_service()
+    service = get_gmail_service_from_token(access_token)
     try:
         results = service.users().messages().list(
             userId='me',
