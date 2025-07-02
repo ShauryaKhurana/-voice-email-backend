@@ -41,7 +41,7 @@ def get_gmail_service():
     return service
 
 def get_gmail_service_from_token(access_token):
-    creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    creds = Credentials(token=access_token)
     service = build("gmail", "v1", credentials=creds)
     return service
 
