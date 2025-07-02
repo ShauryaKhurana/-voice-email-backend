@@ -25,9 +25,6 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose"
 ]
 
-<<<<<<< HEAD
-REDIRECT_URI = "https://voice-email-backend.onrender.com/oauth2callback"  # Update if your backend URL changes
-=======
 def get_gmail_service():
     creds = None
     if os.path.exists("token.json"):
@@ -42,7 +39,6 @@ def get_gmail_service():
             token.write(creds.to_json())
     service = build("gmail", "v1", credentials=creds)
     return service
->>>>>>> parent of 0eb36d5 (Gmail 1)
 
 @app.route('/chat', methods=['POST'])
 def chat():
@@ -125,7 +121,7 @@ def apricot_email_assistant():
     if not auth_header.startswith('Bearer '):
         return jsonify({'reply': 'Missing or invalid Authorization header'}), 401
     access_token = auth_header.split(' ')[1]
-    service = get_gmail_service_from_token(access_token)
+    service = get_gmail_service()
     data = request.get_json()
     command = data.get('command', '')
     if not command:
@@ -292,7 +288,7 @@ def apricot_mailbox():
     if not auth_header.startswith('Bearer '):
         return jsonify({'mailbox': [], 'error': 'Missing or invalid Authorization header'}), 401
     access_token = auth_header.split(' ')[1]
-    service = get_gmail_service_from_token(access_token)
+    service = get_gmail_service()
     try:
         results = service.users().messages().list(
             userId='me',
