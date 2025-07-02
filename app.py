@@ -14,6 +14,7 @@ from googleapiclient.errors import HttpError
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from difflib import get_close_matches
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins for development
@@ -25,6 +26,9 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.compose"
 ]
+
+# In-memory session state (for demo; use Redis or DB for production)
+pending_actions = defaultdict(dict)
 
 def get_gmail_service():
     creds = None
@@ -145,6 +149,76 @@ def apricot_email_assistant():
     if not command:
         print('[EMAIL ASSISTANT] No command received')
         return jsonify({'reply': "No command received.", 'speak': "No command received."}), 400
+
+    # Check for pending action (confirmation flow)
+    session = pending_actions[access_token]
+    if session.get('pending'):
+        # User is confirming or clarifying
+        if session['pending'] == 'confirm_recipient':
+            user_reply = command.strip().lower()
+            matches = session['matches']
+            if user_reply.isdigit() and 1 <= int(user_reply) <= len(matches):
+                recipient = matches[int(user_reply)-1]
+            else:
+                recipient = next((m for m in matches if user_reply in m.lower()), None)
+            if not recipient:
+                del pending_actions[access_token]
+                return jsonify({'reply': 'Could not match that contact. Please try again.', 'speak': 'Could not match that contact. Please try again.'})
+            session['recipient'] = recipient
+            if session['action'] == 'send':
+                session['pending'] = 'ask_subject'
+                return jsonify({'reply': f"What should be the subject of the email to {recipient}?", 'speak': f"What should be the subject of the email to {recipient}?", 'pending': 'ask_subject'})
+            elif session['action'] == 'forward':
+                session['pending'] = 'confirm_message'
+                # Get latest email
+                results = service.users().messages().list(
+                    userId='me', maxResults=1, labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash').execute()
+                messages = results.get('messages', [])
+                if not messages:
+                    del pending_actions[access_token]
+                    return jsonify({'reply': "No email found to forward.", 'speak': "No email found to forward."})
+                msg_id = messages[0]['id']
+                msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+                headers = msg_data['payload'].get('headers', [])
+                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                snippet = msg_data.get('snippet', '')
+                forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
+                forward_response = openai_client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": forward_prompt}]
+                )
+                forward_body = forward_response.choices[0].message.content.strip()
+                session['subject'] = "Fwd: " + subject
+                session['body'] = forward_body
+                reply = f"Ready to send this email to {recipient}:\nSubject: {session['subject']}\nBody: {session['body']}\nSay 'yes' to send or 'no' to cancel."
+                return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_message'})
+        elif session['pending'] == 'ask_subject':
+            session['subject'] = command.strip()
+            session['pending'] = 'ask_body'
+            return jsonify({'reply': f"What should be the content of the email to {session['recipient']}?", 'speak': f"What should be the content of the email to {session['recipient']}?", 'pending': 'ask_body'})
+        elif session['pending'] == 'ask_body':
+            session['body'] = command.strip()
+            session['pending'] = 'confirm_message'
+            reply = f"Ready to send this email to {session['recipient']}:\nSubject: {session['subject']}\nBody: {session['body']}\nSay 'yes' to send or 'no' to cancel."
+            return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_message'})
+        elif session['pending'] == 'confirm_message':
+            user_reply = command.strip().lower()
+            if user_reply in ['yes', 'send', 'confirm', 'okay', 'ok']:
+                from email.mime.text import MIMEText
+                import base64
+                message = MIMEText(session['body'])
+                message['to'] = session['recipient']
+                message['subject'] = session['subject']
+                raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+                msg = {'raw': raw}
+                service.users().messages().send(userId='me', body=msg).execute()
+                del pending_actions[access_token]
+                return jsonify({'reply': f"Email sent to {session['recipient']}.", 'speak': f"Email sent to {session['recipient']}."})
+            else:
+                del pending_actions[access_token]
+                return jsonify({'reply': "Cancelled sending email.", 'speak': "Cancelled sending email."})
 
     supported = [
         'summarize unread emails',
@@ -291,39 +365,28 @@ def apricot_email_assistant():
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
-                recipient = extract_response.choices[0].message.content.strip()
-                print(f'[EMAIL ASSISTANT] Forward recipient: {recipient}')
-                # Get latest email
-                results = service.users().messages().list(
-                    userId='me',
-                    maxResults=1,
-                    labelIds=['CATEGORY_PERSONAL', 'INBOX'],
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
+                recipient_query = extract_response.choices[0].message.content.strip()
+                # Search contacts in mailbox
+                results = service.users().messages().list(userId='me', maxResults=50, q='').execute()
                 messages = results.get('messages', [])
-                if not messages:
-                    return jsonify({'reply': "No email found to forward.", 'speak': "No email found to forward."})
-                msg_id = messages[0]['id']
-                msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-                headers = msg_data['payload'].get('headers', [])
-                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                snippet = msg_data.get('snippet', '')
-                forward_prompt = f"Write a short message to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-                forward_response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": forward_prompt}]
-                )
-                forward_body = forward_response.choices[0].message.content.strip()
-                from email.mime.text import MIMEText
-                import base64
-                fwd_message = MIMEText(forward_body)
-                fwd_message['to'] = recipient
-                fwd_message['subject'] = "Fwd: " + subject
-                raw = base64.urlsafe_b64encode(fwd_message.as_bytes()).decode()
-                msg = {'raw': raw}
-                service.users().messages().send(userId='me', body=msg).execute()
-                return jsonify({'reply': f"Email forwarded to {recipient}.", 'speak': f"Email forwarded to {recipient}."})
+                contacts = set()
+                for msg in messages:
+                    msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
+                    for h in msg_data['payload'].get('headers', []):
+                        if h['name'] in ['From', 'To']:
+                            contacts.add(h['value'])
+                matches = [c for c in contacts if recipient_query.lower() in c.lower()]
+                if not matches:
+                    pending_actions[access_token] = {}
+                    return jsonify({'reply': f"Couldn't find anyone matching '{recipient_query}'. Please say the email address.", 'speak': f"Couldn't find anyone matching '{recipient_query}'. Please say the email address.", 'pending': 'confirm_recipient', 'matches': []})
+                if len(matches) == 1:
+                    # Proceed to confirmation
+                    pending_actions[access_token] = {'pending': 'confirm_message', 'recipient': matches[0], 'action': 'forward', 'original_command': command}
+                    return apricot_email_assistant()
+                # Ask user to pick
+                reply = "I found multiple contacts. Please say the number or email:\n" + '\n'.join([f"{i+1}. {m}" for i, m in enumerate(matches)])
+                pending_actions[access_token] = {'pending': 'confirm_recipient', 'matches': matches, 'action': 'forward', 'original_command': command}
+                return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_recipient', 'matches': matches})
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (forward to): {e}')
                 return jsonify({'reply': f"Failed to forward: {e}", 'speak': f"Failed to forward: {e}"})
@@ -336,24 +399,28 @@ def apricot_email_assistant():
                     model="gpt-3.5-turbo",
                     messages=[{"role": "user", "content": extract_prompt}]
                 )
-                recipient = extract_response.choices[0].message.content.strip()
-                print(f'[EMAIL ASSISTANT] Send email recipient: {recipient}')
-                # Generate email body using OpenAI
-                body_prompt = f"Write a short, friendly email to {recipient} about what the user just said: '{command}'."
-                body_response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": body_prompt}]
-                )
-                email_body = body_response.choices[0].message.content.strip()
-                from email.mime.text import MIMEText
-                import base64
-                message = MIMEText(email_body)
-                message['to'] = recipient
-                message['subject'] = "A message from Precort"
-                raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                msg = {'raw': raw}
-                service.users().messages().send(userId='me', body=msg).execute()
-                return jsonify({'reply': f"Email sent to {recipient}.", 'speak': f"Email sent to {recipient}."})
+                recipient_query = extract_response.choices[0].message.content.strip()
+                # Search contacts in mailbox
+                results = service.users().messages().list(userId='me', maxResults=50, q='').execute()
+                messages = results.get('messages', [])
+                contacts = set()
+                for msg in messages:
+                    msg_data = service.users().messages().get(userId='me', id=msg['id'], format='metadata', metadataHeaders=['From', 'To']).execute()
+                    for h in msg_data['payload'].get('headers', []):
+                        if h['name'] in ['From', 'To']:
+                            contacts.add(h['value'])
+                matches = [c for c in contacts if recipient_query.lower() in c.lower()]
+                if not matches:
+                    pending_actions[access_token] = {}
+                    return jsonify({'reply': f"Couldn't find anyone matching '{recipient_query}'. Please say the email address.", 'speak': f"Couldn't find anyone matching '{recipient_query}'. Please say the email address.", 'pending': 'confirm_recipient', 'matches': []})
+                if len(matches) == 1:
+                    # Proceed to confirmation
+                    pending_actions[access_token] = {'pending': 'confirm_message', 'recipient': matches[0], 'action': 'send', 'original_command': command}
+                    return apricot_email_assistant()
+                # Ask user to pick
+                reply = "I found multiple contacts. Please say the number or email:\n" + '\n'.join([f"{i+1}. {m}" for i, m in enumerate(matches)])
+                pending_actions[access_token] = {'pending': 'confirm_recipient', 'matches': matches, 'action': 'send', 'original_command': command}
+                return jsonify({'reply': reply, 'speak': reply, 'pending': 'confirm_recipient', 'matches': matches})
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (send email): {e}')
                 return jsonify({'reply': f"Failed to send email: {e}", 'speak': f"Failed to send email: {e}"})
