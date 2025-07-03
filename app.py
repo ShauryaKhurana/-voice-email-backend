@@ -15,6 +15,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow, Flow
 from google.auth.transport.requests import Request
 import pathlib
 import pickle
+from functools import lru_cache
+import time
 
 app = Flask(__name__)
 CORS(app, origins=["https://precort.com", "http://localhost:3000"], supports_credentials=True)
@@ -28,6 +30,30 @@ SCOPES = [
 ]
 
 REDIRECT_URI = "https://voice-email-backend.onrender.com/oauth2callback"  # Update if your backend URL changes
+
+CATEGORY_LABELS = ["Urgent", "Important", "Promotion", "Spam", "Misc"]
+CATEGORY_KEYWORDS = {
+    "Urgent": ["asap", "urgent", "immediately", "action required", "important update", "critical"],
+    "Important": ["important", "please review", "attention", "reminder", "follow up"],
+    "Promotion": ["sale", "discount", "offer", "deal", "promotion", "buy now", "limited time"],
+    "Spam": ["lottery", "prize", "winner", "free", "click here", "unsubscribe", "congratulations", "claim now"],
+}
+
+# Simple in-memory cache for categorization results (per user)
+_categorized_cache = {}
+_CACHE_TTL = 300  # seconds
+
+def _cache_key(user_id):
+    return f"categorized:{user_id}"
+
+def _get_cached_categories(user_id):
+    entry = _categorized_cache.get(_cache_key(user_id))
+    if entry and (time.time() - entry["ts"] < _CACHE_TTL):
+        return entry["data"]
+    return None
+
+def _set_cached_categories(user_id, data):
+    _categorized_cache[_cache_key(user_id)] = {"data": data, "ts": time.time()}
 
 def get_gmail_service():
     creds = None
@@ -348,6 +374,77 @@ def oauth2callback():
     with open("token.json", "w") as token:
         token.write(credentials.to_json())
     return "Gmail login successful! You can close this tab and return to the app."
+
+def categorize_email_openai(subject, snippet):
+    prompt = (
+        "Categorize the following email as one of: Urgent, Important, Promotion, Spam, Misc. "
+        "Reply ONLY with the category name.\n"
+        f"Subject: {subject}\nSnippet: {snippet}"
+    )
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        category = response.choices[0].message.content.strip()
+        if category in CATEGORY_LABELS:
+            return category
+    except Exception:
+        pass
+    return None
+
+def categorize_email_keywords(subject, snippet):
+    text = f"{subject} {snippet}".lower()
+    for cat, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw in text for kw in keywords):
+            return cat
+    return "Misc"
+
+@app.route('/apricot-categorized-mailbox', methods=['GET'])
+def apricot_categorized_mailbox():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({'mailbox': {}, 'error': 'Missing or invalid Authorization header'}), 401
+    access_token = auth_header.split(' ')[1]
+    service = get_gmail_service_from_token(access_token)
+    user_id = 'me'  # For demo, always 'me'.
+    # Check cache
+    cached = _get_cached_categories(user_id)
+    if cached:
+        return jsonify({'mailbox': cached, 'cached': True})
+    try:
+        results = service.users().messages().list(
+            userId=user_id,
+            labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+            maxResults=20,
+            q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+        ).execute()
+        messages = results.get('messages', [])
+        categorized = {cat: [] for cat in CATEGORY_LABELS}
+        for msg in messages:
+            msg_data = service.users().messages().get(userId=user_id, id=msg['id']).execute()
+            headers = msg_data['payload'].get('headers', [])
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            recipient = next((h['value'] for h in headers if h['name'] == 'To'), 'Unknown Recipient')
+            snippet = msg_data.get('snippet', '')
+            # Try OpenAI categorization, fallback to keywords
+            category = categorize_email_openai(subject, snippet)
+            if not category:
+                category = categorize_email_keywords(subject, snippet)
+            if category not in CATEGORY_LABELS:
+                category = "Misc"
+            categorized[category].append({
+                'id': msg['id'],
+                'subject': subject,
+                'sender': sender,
+                'recipient': recipient,
+                'snippet': snippet
+            })
+        _set_cached_categories(user_id, categorized)
+        return jsonify({'mailbox': categorized, 'cached': False})
+    except Exception as e:
+        return jsonify({'mailbox': {}, 'error': str(e)})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
