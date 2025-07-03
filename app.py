@@ -14,6 +14,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from difflib import get_close_matches
 from collections import defaultdict
+from functools import lru_cache
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins for development
@@ -63,6 +64,32 @@ def get_user_name_from_gmail(access_token):
     except Exception as e:
         print(f'[EMAIL ASSISTANT] Error getting user name: {e}')
         return 'Gmail User'
+
+
+@lru_cache(maxsize=2000)
+def categorize_email_openai(subject, sender, snippet):
+    prompt = f"""
+    Classify this email into one of: Urgent, Important, Promotion, Spam, Misc.
+    Urgent = needs attention before end of day.
+    Email:
+    Subject: {subject}
+    From: {sender}
+    Snippet: {snippet}
+    Category:
+    """
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        category = response.choices[0].message.content.strip().split("\n")[0]
+        category = category.capitalize()
+        if category not in ["Urgent", "Important", "Promotion", "Spam", "Misc"]:
+            return "Misc"
+        return category
+    except Exception as e:
+        print(f"[EMAIL ASSISTANT] Categorization error: {e}")
+        return "Misc"
 
 
 @app.route('/chat', methods=['POST'])
@@ -804,11 +831,14 @@ def apricot_mailbox():
                 'Unknown Recipient'
             )
             snippet = msg_data.get('snippet', '')
+            # Categorize
+            category = categorize_email_openai(subject, sender, snippet)
             mailbox.append({'id': msg['id'],
                             'subject': subject,
                             'sender': sender,
                             'recipient': recipient,
-                            'snippet': snippet})
+                            'snippet': snippet,
+                            'category': category})
         return jsonify({'mailbox': mailbox})
     except Exception as e:
         print("Gmail API error:", e)  # DEBUG
