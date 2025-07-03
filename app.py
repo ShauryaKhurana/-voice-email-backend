@@ -898,7 +898,6 @@ def apricot_categorized_mailbox():
 
 
 # Batch categorize emails using OpenAI
-
 def batch_categorize_emails_openai(email_list):
     prompt = """
 You are an expert email assistant. Categorize each email as one of: Urgent, Important, Promotion, Spam, Misc.
@@ -962,4 +961,4 @@ def extract_recipient_name(command):
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=True) 
