@@ -17,7 +17,7 @@ import pathlib
 import pickle
 
 app = Flask(__name__)
-CORS(app)  # Allow all origins for development
+CORS(app, origins=["https://precort.com", "http://localhost:3000"], supports_credentials=True)
 
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.basicConfig(level=logging.INFO)
