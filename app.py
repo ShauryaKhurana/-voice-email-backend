@@ -15,6 +15,8 @@ from google.auth.transport.requests import Request
 from difflib import get_close_matches
 from collections import defaultdict
 from functools import lru_cache
+import time
+import json
 
 app = Flask(__name__)
 CORS(app)  # Allow all origins for development
@@ -30,6 +32,17 @@ SCOPES = [
 # In-memory session state (for demo; use Redis or DB for production)
 pending_actions = defaultdict(dict)
 
+# Add a persistent cache for email categories
+CATEGORY_CACHE_FILE = 'email_category_cache.json'
+try:
+    with open(CATEGORY_CACHE_FILE, 'r') as f:
+        EMAIL_CATEGORY_CACHE = json.load(f)
+except Exception:
+    EMAIL_CATEGORY_CACHE = {}
+
+def save_category_cache():
+    with open(CATEGORY_CACHE_FILE, 'w') as f:
+        json.dump(EMAIL_CATEGORY_CACHE, f)
 
 def get_gmail_service():
     creds = None
@@ -843,6 +856,108 @@ def apricot_mailbox():
     except Exception as e:
         print("Gmail API error:", e)  # DEBUG
         return jsonify({'mailbox': [], 'error': str(e)})
+
+
+@app.route('/apricot-categorized-mailbox', methods=['GET'])
+def apricot_categorized_mailbox():
+    auth_header = request.headers.get('Authorization', '')
+    if not auth_header.startswith('Bearer '):
+        return jsonify({'mailbox': [], 'error': 'Missing or invalid Authorization header'}), 401
+    access_token = auth_header.split(' ')[1]
+    service = get_gmail_service_from_token(access_token)
+    try:
+        results = service.users().messages().list(
+            userId='me',
+            labelIds=['CATEGORY_PERSONAL', 'INBOX'],
+            maxResults=1000,
+            q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+        ).execute()
+        messages = results.get('messages', [])
+        mailbox = []
+        uncategorized = []
+        for msg in messages:
+            msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+            headers = msg_data['payload'].get('headers', [])
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            recipient = next((h['value'] for h in headers if h['name'] == 'To'), 'Unknown Recipient')
+            snippet = msg_data.get('snippet', '')
+            mailbox.append({'id': msg['id'], 'subject': subject, 'sender': sender, 'recipient': recipient, 'snippet': snippet})
+            if msg['id'] not in EMAIL_CATEGORY_CACHE:
+                uncategorized.append({'id': msg['id'], 'subject': subject, 'sender': sender, 'snippet': snippet})
+        # Batch categorize uncategorized emails in chunks
+        for i in range(0, len(uncategorized), 50):
+            batch_categorize_emails_openai(uncategorized[i:i+50])
+        # Attach category to each email
+        for email in mailbox:
+            email['category'] = EMAIL_CATEGORY_CACHE.get(email['id'], 'Misc')
+        return jsonify({'mailbox': mailbox})
+    except Exception as e:
+        print("Gmail API error:", e)
+        return jsonify({'mailbox': [], 'error': str(e)})
+
+
+# Batch categorize emails using OpenAI
+
+def batch_categorize_emails_openai(email_list):
+    prompt = """
+You are an expert email assistant. Categorize each email as one of: Urgent, Important, Promotion, Spam, Misc.
+Urgent = needs attention before end of day. Important = work, personal, bills, or relevant. Promotion = marketing, offers, newsletters. Spam = scams, phishing, junk. Misc = anything else.
+
+For each email, reply with just the category (one of: Urgent, Important, Promotion, Spam, Misc) on a new line, in the same order as the emails provided.
+
+Emails:
+"""
+    for i, email in enumerate(email_list):
+        prompt += f"\nEmail {i+1}:\nSubject: {email['subject']}\nFrom: {email['sender']}\nSnippet: {email['snippet']}"
+    prompt += "\nCategories:"
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        categories = [c.strip().capitalize() for c in response.choices[0].message.content.strip().split('\n') if c.strip()]
+        # Fallback if OpenAI returns less than expected
+        if len(categories) != len(email_list):
+            categories += ["Misc"] * (len(email_list) - len(categories))
+        for i, email in enumerate(email_list):
+            cat = categories[i] if categories[i] in ["Urgent", "Important", "Promotion", "Spam", "Misc"] else "Misc"
+            EMAIL_CATEGORY_CACHE[email['id']] = cat
+        save_category_cache()
+    except Exception as e:
+        print(f"[EMAIL ASSISTANT] Batch categorization error: {e}")
+        # Fallback: keyword-based
+        for email in email_list:
+            subj = email['subject'].lower()
+            if any(word in subj for word in ["invoice", "payment due", "asap", "urgent", "today", "immediately"]):
+                EMAIL_CATEGORY_CACHE[email['id']] = "Urgent"
+            elif any(word in subj for word in ["offer", "sale", "discount", "deal", "newsletter"]):
+                EMAIL_CATEGORY_CACHE[email['id']] = "Promotion"
+            elif any(word in subj for word in ["spam", "lottery", "prize", "winner", "phishing"]):
+                EMAIL_CATEGORY_CACHE[email['id']] = "Spam"
+            elif any(word in subj for word in ["meeting", "project", "update", "reminder", "bill", "statement"]):
+                EMAIL_CATEGORY_CACHE[email['id']] = "Important"
+            else:
+                EMAIL_CATEGORY_CACHE[email['id']] = "Misc"
+        save_category_cache()
+
+
+# --- Robust recipient extraction for send/forward ---
+def extract_recipient_name(command):
+    prompt = f"""
+    Extract the recipient's name from this command: '{command}'
+    Only return the name, not the email address or extra words.
+    """
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        name = response.choices[0].message.content.strip().split('\n')[0]
+        return name
+    except Exception as e:
+        print(f"[EMAIL ASSISTANT] Recipient extraction error: {e}")
+        return None
 
 
 if __name__ == '__main__':
