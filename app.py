@@ -281,25 +281,25 @@ def apricot_email_assistant():
     print(f'[EMAIL ASSISTANT] Matched intent: {intent}')
 
     try:
-        # Summarize unread emails
+    # Summarize unread emails
         if 'summarize unread' in intent or 'summarize my inbox' in intent:
-            try:
-                results = service.users().messages().list(
-                    userId='me',
-                    labelIds=['UNREAD', 'CATEGORY_PERSONAL', 'INBOX'],
-                    maxResults=5,
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
-                messages = results.get('messages', [])
-                if not messages:
+        try:
+            results = service.users().messages().list(
+                userId='me',
+                labelIds=['UNREAD', 'CATEGORY_PERSONAL', 'INBOX'],
+                maxResults=5,
+                q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+            ).execute()
+            messages = results.get('messages', [])
+            if not messages:
                     return jsonify({'reply': "You have no unread emails in your Primary inbox.", 'speak': "You have no unread emails in your Primary inbox."})
-                summaries = []
-                for msg in messages:
-                    msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
-                    headers = msg_data['payload'].get('headers', [])
-                    subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                    sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                    summaries.append(f"Email from {sender}: {subject}")
+            summaries = []
+            for msg in messages:
+                msg_data = service.users().messages().get(userId='me', id=msg['id']).execute()
+                headers = msg_data['payload'].get('headers', [])
+                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+                summaries.append(f"Email from {sender}: {subject}")
                 reply = '\n'.join(summaries)
                 return jsonify({'reply': reply, 'speak': reply})
             except Exception as e:
@@ -328,77 +328,77 @@ def apricot_email_assistant():
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (read my latest): {e}')
                 return jsonify({'reply': f"Failed to read email: {e}", 'speak': f"Failed to read email: {e}"})
-        # Archive latest email
+    # Archive latest email
         if 'archive' in intent:
-            try:
-                results = service.users().messages().list(
-                    userId='me',
-                    maxResults=1,
+        try:
+            results = service.users().messages().list(
+                userId='me',
+                maxResults=1,
                     labelIds=['CATEGORY_PERSONAL', 'INBOX'],
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
-                messages = results.get('messages', [])
-                if not messages:
+                q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+            ).execute()
+            messages = results.get('messages', [])
+            if not messages:
                     return jsonify({'reply': "No email found to archive.", 'speak': "No email found to archive."})
-                msg_id = messages[0]['id']
-                service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['INBOX']}).execute()
+            msg_id = messages[0]['id']
+            service.users().messages().modify(userId='me', id=msg_id, body={'removeLabelIds': ['INBOX']}).execute()
                 return jsonify({'reply': "Email archived.", 'speak': "Email archived."})
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (archive): {e}')
                 return jsonify({'reply': f"Failed to archive: {e}", 'speak': f"Failed to archive: {e}"})
-        # Delete latest email
+    # Delete latest email
         if 'delete' in intent or 'trash' in intent:
-            try:
-                results = service.users().messages().list(
-                    userId='me',
-                    maxResults=1,
+        try:
+            results = service.users().messages().list(
+                userId='me',
+                maxResults=1,
                     labelIds=['CATEGORY_PERSONAL', 'INBOX'],
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
-                messages = results.get('messages', [])
-                if not messages:
+                q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+            ).execute()
+            messages = results.get('messages', [])
+            if not messages:
                     return jsonify({'reply': "No email found to delete.", 'speak': "No email found to delete."})
-                msg_id = messages[0]['id']
-                service.users().messages().trash(userId='me', id=msg_id).execute()
+            msg_id = messages[0]['id']
+            service.users().messages().trash(userId='me', id=msg_id).execute()
                 return jsonify({'reply': "Email moved to Trash.", 'speak': "Email moved to Trash."})
             except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (delete): {e}')
                 return jsonify({'reply': f"Failed to delete: {e}", 'speak': f"Failed to delete: {e}"})
-        # Reply to latest email
+    # Reply to latest email
         if 'reply' in intent:
-            try:
-                results = service.users().messages().list(
-                    userId='me',
-                    maxResults=1,
+        try:
+            results = service.users().messages().list(
+                userId='me',
+                maxResults=1,
                     labelIds=['CATEGORY_PERSONAL', 'INBOX'],
-                    q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
-                ).execute()
-                messages = results.get('messages', [])
-                if not messages:
+                q='-category:promotions -category:social -category:updates -category:forums -in:spam -in:trash'
+            ).execute()
+            messages = results.get('messages', [])
+            if not messages:
                     return jsonify({'reply': "No email found to reply to.", 'speak': "No email found to reply to."})
-                msg_id = messages[0]['id']
-                msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
-                headers = msg_data['payload'].get('headers', [])
-                subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
-                sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
-                snippet = msg_data.get('snippet', '')
+            msg_id = messages[0]['id']
+            msg_data = service.users().messages().get(userId='me', id=msg_id, format='full').execute()
+            headers = msg_data['payload'].get('headers', [])
+            subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
+            sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            snippet = msg_data.get('snippet', '')
                 user_name = get_user_name_from_gmail(access_token)
                 reply_prompt = f"Write a short, polite reply to this email from {user_name}:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-                reply_response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": reply_prompt}]
-                )
-                reply_body = reply_response.choices[0].message.content.strip()
-                from email.mime.text import MIMEText
-                import base64
-                message = MIMEText(reply_body)
-                message['to'] = sender
-                message['subject'] = "Re: " + subject
-                raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
-                msg = {'raw': raw, 'threadId': msg_id}
-                service.users().messages().send(userId='me', body=msg).execute()
+            reply_response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": reply_prompt}]
+            )
+            reply_body = reply_response.choices[0].message.content.strip()
+            from email.mime.text import MIMEText
+            import base64
+            message = MIMEText(reply_body)
+            message['to'] = sender
+            message['subject'] = "Re: " + subject
+            raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            msg = {'raw': raw, 'threadId': msg_id}
+            service.users().messages().send(userId='me', body=msg).execute()
                 return jsonify({'reply': "Reply sent.", 'speak': "Reply sent."})
-            except Exception as e:
+        except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (reply): {e}')
                 return jsonify({'reply': f"Failed to reply: {e}", 'speak': f"Failed to reply: {e}"})
         # Forward my latest email to [name]
@@ -425,7 +425,7 @@ def apricot_email_assistant():
                 
                 # Search contacts in mailbox and build clean contact list
                 results = service.users().messages().list(userId='me', maxResults=100, q='').execute()
-                messages = results.get('messages', [])
+            messages = results.get('messages', [])
                 contacts_dict = {}  # name -> primary email
                 
                 for msg in messages:
@@ -499,11 +499,11 @@ def apricot_email_assistant():
                 }
                 user_name = get_user_name_from_gmail(access_token)
                 forward_prompt = f"Write a short message from {user_name} to forward this email:\nFrom: {sender}\nSubject: {subject}\nSnippet: {snippet}"
-                forward_response = openai_client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": forward_prompt}]
-                )
-                forward_body = forward_response.choices[0].message.content.strip()
+            forward_response = openai_client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": forward_prompt}]
+            )
+            forward_body = forward_response.choices[0].message.content.strip()
                 session['subject'] = "Fwd: " + subject
                 session['body'] = forward_body
                 reply = f"Did you mean {matches[0]}? Say yes or no."
@@ -626,10 +626,10 @@ def apricot_email_assistant():
                 count = len(messages)
                 reply = f"You have {count} unread emails in your Primary inbox."
                 return jsonify({'reply': reply, 'speak': reply})
-            except Exception as e:
+        except Exception as e:
                 print(f'[EMAIL ASSISTANT] Error (how many unread): {e}')
                 return jsonify({'reply': f"Failed to count unread emails: {e}", 'speak': f"Failed to count unread emails: {e}"})
-        # Default: echo intent
+    # Default: echo intent
         print(f'[EMAIL ASSISTANT] Default intent: {intent}')
         return jsonify({'reply': f'Intent: {intent}', 'speak': f'Intent: {intent}'})
     except Exception as e:
@@ -658,8 +658,9 @@ def apricot_mailbox():
             headers = msg_data['payload'].get('headers', [])
             subject = next((h['value'] for h in headers if h['name'] == 'Subject'), 'No Subject')
             sender = next((h['value'] for h in headers if h['name'] == 'From'), 'Unknown Sender')
+            recipient = next((h['value'] for h in headers if h['name'] == 'To'), 'Unknown Recipient')
             snippet = msg_data.get('snippet', '')
-            mailbox.append({'id': msg['id'], 'subject': subject, 'sender': sender, 'snippet': snippet})
+            mailbox.append({'id': msg['id'], 'subject': subject, 'sender': sender, 'recipient': recipient, 'snippet': snippet})
         return jsonify({'mailbox': mailbox})
     except Exception as e:
         print("Gmail API error:", e)  # DEBUG
