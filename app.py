@@ -19,7 +19,8 @@ from functools import lru_cache
 import time
 
 app = Flask(__name__)
-CORS(app, origins=["https://precort.com", "http://localhost:3000"], supports_credentials=True)
+# DEBUG: Allow all origins for CORS (for troubleshooting only)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 logging.basicConfig(level=logging.INFO)
@@ -450,13 +451,15 @@ def apricot_categorized_mailbox():
 def exchange_code():
     data = request.get_json()
     code = data.get('code')
+    # Use the same redirect_uri as in Google Cloud Console
+    redirect_uri = data.get('redirect_uri') or 'https://precort-c9846.web.app'
     if not code:
         return jsonify({'error': 'Missing code'}), 400
     try:
         flow = Flow.from_client_secrets_file(
             'credentials.json',
             scopes=SCOPES,
-            redirect_uri=data.get('redirect_uri') or REDIRECT_URI
+            redirect_uri=redirect_uri
         )
         flow.fetch_token(code=code)
         credentials = flow.credentials
