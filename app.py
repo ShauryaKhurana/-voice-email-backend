@@ -446,6 +446,29 @@ def apricot_categorized_mailbox():
     except Exception as e:
         return jsonify({'mailbox': {}, 'error': str(e)})
 
+@app.route('/exchange-code', methods=['POST'])
+def exchange_code():
+    data = request.get_json()
+    code = data.get('code')
+    if not code:
+        return jsonify({'error': 'Missing code'}), 400
+    try:
+        flow = Flow.from_client_secrets_file(
+            'credentials.json',
+            scopes=SCOPES,
+            redirect_uri=data.get('redirect_uri') or REDIRECT_URI
+        )
+        flow.fetch_token(code=code)
+        credentials = flow.credentials
+        return jsonify({
+            'access_token': credentials.token,
+            'refresh_token': credentials.refresh_token,
+            'expires_in': credentials.expiry.timestamp() if credentials.expiry else None,
+            'token_type': credentials.token_uri
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True) 
